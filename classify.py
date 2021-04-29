@@ -283,14 +283,13 @@ def get_batch_simple(X, y, repeats, max_n_of_pairs_per_class):
         yield X_train, y_train, X_test, y_test
 
 
-def evaluate_samesource(desc, dataset, n_frequent_words, tokens_per_sample, max_n_of_pairs_per_class, preprocessor, classifier, calibrator,
+def evaluate_samesource(desc, dataset, n_frequent_words, max_n_of_pairs_per_class, preprocessor, classifier, calibrator,
                         plot=None, repeats=1):
     """
     Run an experiment with the parameters provided.
 
     :param desc: free text description of the experiment
     :param frida_path: path to transcript index file
-    :param n_frequent_words: int: number of most frequent words
     :param tokens_per_sample: int: number of tokens per sample (sample length)
     :param preprocessor: Pipeline: an sklearn pipeline
     :param classifier: Pipeline: an sklearn pipeline with a classifier as last element
@@ -302,7 +301,7 @@ def evaluate_samesource(desc, dataset, n_frequent_words, tokens_per_sample, max_
     # calibrator = lir.plotting.PlottingCalibrator(calibrator, lir.plotting.plot_score_distribution_and_calibrator_fit)
     clf = lir.CalibratedScorer(classifier, calibrator)
 
-    ds = data.DataSource(dataset, n_frequent_words=n_frequent_words, tokens_per_sample=tokens_per_sample)
+    ds = data.DataSource(dataset, n_frequent_words=n_frequent_words)
     X, y = ds.get()
     assert X.shape[0] > 0
 
@@ -330,23 +329,24 @@ def evaluate_samesource(desc, dataset, n_frequent_words, tokens_per_sample, max_
         plot(lrs, y_all, title=title, shortname=desc)
 
     cllr = lir.metrics.cllr(lrs, y_all)
-    cllrmin = lir.metrics.cllr_min(lrs, y_all)
-    cllrcal = cllr - cllrmin
+    # cllrmin = lir.metrics.cllr_min(lrs, y_all)
+    # cllrcal = cllr - cllrmin
     acc = np.mean((lrs > 1) == y_all)
     recall = np.mean(lrs[y_all == 1] > 1) # true positive rate
     precision = np.mean(y_all[lrs > 1] == 1)
-    tnr = np.mean(lrs[y_all == 0] < 1) # true negative rate
-    mean_logLR_diff = np.mean(np.log(lrs[y_all == 0]))
-    mean_logLR_same = np.mean(np.log(lrs[y_all == 1]))
+    # tnr = np.mean(lrs[y_all == 0] < 1) # true negative rate
+    # mean_logLR_diff = np.mean(np.log(lrs[y_all == 0]))
+    # mean_logLR_same = np.mean(np.log(lrs[y_all == 1]))
 
     fpr, tpr, threshold = roc_curve(list(y_all), list(lrs), pos_label=1)
     fnr = 1 - tpr
     eer = fpr[np.nanargmin(np.absolute((fnr - fpr)))]
 
-    Metrics = collections.namedtuple('Metrics', ['cllr', 'cllrmin', 'cllrcal', 'accuracy', 'eer', 'recall', 'tnr',
-                                                 'precision', 'mean_logLR_diff', 'mean_logLR_same'])
+    # Metrics = collections.namedtuple('Metrics', ['cllr', 'cllrmin', 'cllrcal', 'accuracy', 'eer', 'recall', 'tnr',
+    #                                              'precision', 'mean_logLR_diff', 'mean_logLR_same'])
+    Metrics = collections.namedtuple('Metrics', ['cllr', 'accuracy', 'eer', 'recall', 'precision'])
 
-    return Metrics(cllr, cllrmin, cllrcal, acc, eer, recall, tnr, precision, mean_logLR_diff, mean_logLR_same), lrs, y_all
+    return Metrics(cllr, acc, eer, recall, precision), lrs, y_all
 
 
 def aggregate_results(out_dir, results):
@@ -382,11 +382,6 @@ def run(dataset, resultdir):
         ('pop:none', None),
     ])
 
-    prep_sum = sklearn.pipeline.Pipeline([
-        ('scale:sum', sklearn.preprocessing.Normalizer(norm='l1')),
-        ('pop:none', None),
-    ])
-
     prep_gauss = sklearn.pipeline.Pipeline([
         ('pop:gauss', GaussianCdfTransformer()),  # cumulative density function for each feature
         # ('pop:gauss', sklearn.preprocessing.QuantileTransformer()),  # cumulative density function for each feature
@@ -399,10 +394,6 @@ def run(dataset, resultdir):
 
     ### CLASSIFIERS
 
-    dist_sh = sklearn.pipeline.Pipeline([
-        ('dist:shan', VectorDistance(scipy.spatial.distance.jensenshannon)),
-    ])
-
     dist_br = sklearn.pipeline.Pipeline([
         ('dist:bray', VectorDistance(scipy.spatial.distance.braycurtis)),
     ])
@@ -413,7 +404,6 @@ def run(dataset, resultdir):
 
     logit = sklearn.pipeline.Pipeline([
         ('diff:abs', transformers.AbsDiffTransformer()),
-        # ('shan', ShanDistance()),
         ('clf:logit', LogisticRegression(max_iter=600, class_weight='balanced')),
     ])
 
@@ -429,34 +419,36 @@ def run(dataset, resultdir):
         ('clf:svc', sklearn.svm.SVC(gamma='scale', kernel='linear', probability=True, class_weight='balanced')),
     ])
 
+    svc_br = sklearn.pipeline.Pipeline([
+        ('diff:bray', BrayDistance()),
+        ('clf:svc', sklearn.svm.SVC(gamma='scale', kernel='linear', probability=True, class_weight='balanced')),
+    ])
+
     exp = experiments.Evaluation(evaluate_samesource, partial(aggregate_results, resultdir))
 
     exp.parameter('dataset', dataset)
     exp.parameter('plot', makeplots(resultdir))
 
     exp.parameter('n_frequent_words', 200)
-    exp.addSearch('n_frequent_words', [10, 50, 100, 200, 300, 400, 500], include_default=False)
-
-    exp.parameter('tokens_per_sample', 600)
-    exp.addSearch('tokens_per_sample', [200, 400, 600, 800, 1000, 1200], include_default=False)
+    exp.addSearch('n_frequent_words', [50, 100, 200, 300], include_default=False)
 
     exp.parameter('max_n_of_pairs_per_class', 2000)
     exp.addSearch('max_n_of_pairs_per_class', [500, 1000, 2000], include_default=False)
 
-    exp.parameter('preprocessor', prep_gauss)
+    exp.parameter('preprocessor', prep_none)
 
-    # exp.parameter('classifier', ('dist_man', dist_ma))
     exp.parameter('classifier', ('bray_logit', logit_br))
     exp.addSearch('classifier', [('dist_man', dist_ma), ('dist_bray', dist_br), ('man_logit', logit),
-                                 ('bray_logit', logit_br)], include_default=False)
+                                 ('bray_logit', logit_br), ('man_svc', svc),
+                                 ('bray_svc', svc_br)], include_default=False)
 
     exp.parameter('calibrator', lir.ScalingCalibrator(lir.KDECalibrator()))
-    exp.parameter('repeats', 10)
+    exp.parameter('repeats', 1)
 
     try:
         # exp.runDefaults()
-        exp.runSearch('tokens_per_sample')
-        # exp.runFullGrid(['tokens_per_sample', 'classifier'])
+        exp.runSearch('max_n_of_pairs_per_class')
+        # exp.runFullGrid(['n_frequent_words', 'classifier'])
 
     except Exception as e:
         LOG.fatal(e.args[1])

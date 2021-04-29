@@ -17,9 +17,8 @@ LOG = logging.getLogger(__name__)
 
 
 class DataSource:
-    def __init__(self, data, n_frequent_words, tokens_per_sample):
+    def __init__(self, data, n_frequent_words):
         self._n_freqwords = n_frequent_words
-        self._tokens_per_sample = tokens_per_sample
         self._data = data
 
     def _get_cache_path(self):
@@ -40,15 +39,15 @@ class DataSource:
         wordlist = [word for word, freq in get_frequent_words(speakers_wordlist, self._n_freqwords)]
 
         # build a dictionary of feature vectors
-        speakers = filter_texts_size(speakers_wordlist, wordlist, self._tokens_per_sample)
+        speakers_cov = filter_texts_size(speakers_wordlist, wordlist)
 
         # convert to X, y
-        X, y = to_vector_size(speakers)
+        X, y = to_vector_size(speakers_cov)
 
         return X, y
 
     def __repr__(self):
-        return f'data(freqwords={self._n_freqwords}; ntokens={self._tokens_per_sample})'
+        return f'data(freqwords={self._n_freqwords})'
 
 
 class ExtractWords:
@@ -57,13 +56,12 @@ class ExtractWords:
 
 
 class RearrangeSamples:
-    def __init__(self, n, wordlist):
-        self.n = n
+    def __init__(self, wordlist):
         self.wordlist = wordlist
 
     def __call__(self, items):
-        for i in range(len(items) // self.n):
-            yield [word for word in items[i*self.n: (i+1)*self.n] if word in self.wordlist]
+        yield [word for word in items if word in self.wordlist]
+
 
 
 class CreateFeatureVector:
@@ -106,29 +104,30 @@ def read_session(lines):
     lines_to_words = lines_to_words.replace('start\tend\ttext\n', '').replace('.', '').replace('-', ' ')\
         .replace('?', '').replace('\n', ' ').replace('xxx', '').replace('ggg', '').replace('vvv', '')\
         .replace('*v', '').replace('*s', '')
-    s = lines_to_words.translate({ord(c): None for c in string.punctuation if c != '*'})
+    # s = lines_to_words.translate({ord(c): None for c in string.punctuation if c != '*'}) # don't recall why is this needed
     tk = WhitespaceTokenizer()
-    words = tk.tokenize(s)
+    words = tk.tokenize(lines_to_words)
 
     return words
 
 
-def compile_data(index_path):
+def compile_data(index_path, min_words_in_conv=50):
     basedir = os.path.dirname(index_path)
-    speakers = collections.defaultdict(list)  # create empty dictionary list
+    speakers_conv = collections.defaultdict(list)  # create empty dictionary list
 
     for filepath, digest in tqdm(list(fileio.load_hashtable(index_path).items()), desc='compiling data'):
         path_str = os.path.basename(filepath)
-        speaker_id = path_str[:len(path_str) - 10]  # basename path
+        speaker_conv_id = path_str[:len(path_str) - 6].replace('-', '')  # basename path
         with fileio.sha256_open(os.path.join(basedir, filepath), digest, on_mismatch='warn') as f:
             texts = read_session(f)
-            speakers[speaker_id].extend(texts)
+            if len(texts) >= min_words_in_conv:
+                speakers_conv[speaker_conv_id].extend(texts)
 
-    return speakers
+    return speakers_conv
 
 
-def get_data(path, n_frequent_words, tokens_per_sample):
-    ds = DataSource(path, n_frequent_words=n_frequent_words, tokens_per_sample=tokens_per_sample)
+def get_data(path, n_frequent_words):
+    ds = DataSource(path, n_frequent_words=n_frequent_words)
     return ds.get()
 
 
@@ -151,42 +150,42 @@ def get_frequent_words(speakers, n):
     return freq[:n]
 
 
-def filter_texts_size(speakerdict, wordlist, tokens_per_sample):
+def filter_texts_size(speakerdict, wordlist):
     """
-    it returns per speaker all possible samples (the length of the samples is equal to the lenght of the wordlist and
-    its values are the frequency of the words in the wordlist for that speaker/sample).
+    it returns one conversation of one speaker  (the length of the samples is equal to the length of the wordlist and
+    its values are the frequency of the words in the wordlist for that speaker/conversation).
 
     :param speakerdict: dict of all words used per speaker
     :param wordlist: the n most freq words in corpus
-    :param tokens_per_sample: number of words within a sample
     """
     filters = [
         ExtractWords(),
-        RearrangeSamples(tokens_per_sample, wordlist),
+        RearrangeSamples(wordlist),
         CreateFeatureVector(wordlist),
     ]
     filtered = {}
     for label, texts in speakerdict.items():
         LOG.debug('filter in subset {}'.format(label))
+        # n_words = len(texts)
         for f in filters:
             texts = list(f(texts))
         if len(texts) != 0:
-            filtered[label] = texts
+            filtered[label] = texts  # [100*i/n_words for i in texts]
 
     return filtered
 
 
 def to_vector_size(speakers):
     """
-    returns a matrix where each row correspond to a sample by a speaker, and vector that holds the id of the speaker
+    returns a matrix where each row correspond to a conversation by a speaker, and vector that holds the id of the speaker
 
     :param speakers: the output of filter_texts_size
     """
     labels = []
     features = []
     for label, texts in speakers.items():
-        speaker_id = label[2:]
-        labels.append(len(texts) * [speaker_id])
+        speaker_id = label[2:(len(label)-2)]
+        labels.append(speaker_id)
         features.append(texts)
 
-    return np.concatenate(features), np.concatenate(labels)
+    return np.concatenate(features),  np.array(labels)
